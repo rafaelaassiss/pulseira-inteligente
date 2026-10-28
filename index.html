@@ -3,19 +3,22 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>Visao Assistiva - Protótipo</title>
+<title>Visão Assistiva — Alerta Sonoro</title>
 <style>
-body{margin:0;background:#101820;color:#f5f7fa;font:16px system-ui,sans-serif}main{max-width:720px;margin:auto;padding:18px}h1{font-size:1.5rem}button{background:#7ce0b3;border:0;border-radius:10px;padding:14px 18px;font-size:1rem;font-weight:700}button:disabled{opacity:.5}.viewer{position:relative;margin-top:16px;background:#000;border-radius:12px;overflow:hidden}video{display:block;width:100%;height:auto}canvas{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}#status{margin-top:14px}#detections{line-height:1.6}small{color:#bac7d0}
+body{margin:0;background:#101820;color:#f5f7fa;font:16px system-ui,sans-serif}main{max-width:720px;margin:auto;padding:18px}h1{font-size:1.45rem}button{background:#7ce0b3;color:#101820;border:0;border-radius:10px;padding:14px 18px;font-size:1rem;font-weight:700;margin:3px}button:disabled{opacity:.5}.viewer{position:relative;margin-top:16px;background:#000;border-radius:12px;overflow:hidden}video{display:block;width:100%;height:auto}canvas{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}#status{margin-top:14px}#detections{line-height:1.6}small{color:#bac7d0}label{display:block;margin-top:14px}input{width:100%;accent-color:#7ce0b3}#alerta{font-weight:700;min-height:1.5em}.warn{color:#ffbd72}
 </style>
 </head>
 <body><main>
-<h1>Visão Assistiva — teste de câmera e IA</h1>
-<p>Reconhecimento experimental de objetos. Não utilizar para navegação ou segurança pessoal.</p>
-<button id="start">Iniciar câmera e detecção</button>
+<h1>Visão Assistiva — alerta sonoro</h1>
+<p>Teste experimental: o site emite um bip quando um objeto reconhecido ocupa uma parte grande da imagem. <strong>Não mede distância real e não serve para navegação.</strong></p>
+<button id="start">Iniciar câmera e detecção</button><button id="stop" disabled>Parar</button>
+<label for="threshold">Sensibilidade: alertar quando a caixa ocupar pelo menos <strong id="thresholdValue">20%</strong> da imagem</label>
+<input id="threshold" type="range" min="5" max="60" step="5" value="20">
 <p id="status" role="status" aria-live="polite">Aguardando início.</p>
+<p id="alerta" role="status" aria-live="polite">Sem alerta.</p>
 <div class="viewer"><video id="video" autoplay playsinline muted></video><canvas id="overlay"></canvas></div>
 <p id="detections" aria-live="off">Nenhum resultado ainda.</p>
-<small>Requer HTTPS, permissão da câmera e internet para carregar o modelo na primeira execução. Mantenha esta página aberta.</small>
+<small>Abra no Safari do iPhone via HTTPS. Internet necessária para carregar o modelo. Mantenha a tela ligada e a página aberta. O som depende do volume e das configurações do aparelho.</small>
 </main>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
@@ -24,24 +27,46 @@ const video=document.getElementById('video');
 const canvas=document.getElementById('overlay');
 const statusEl=document.getElementById('status');
 const resultsEl=document.getElementById('detections');
+const alertEl=document.getElementById('alerta');
 const start=document.getElementById('start');
-let model, running=false, busy=false;
+const stop=document.getElementById('stop');
+const threshold=document.getElementById('threshold');
+const thresholdValue=document.getElementById('thresholdValue');
+let model, running=false, busy=false, audioContext=null, lastBeep=0, consecutive=0;
 const labels={person:'pessoa',chair:'cadeira',car:'carro',bicycle:'bicicleta',dog:'cachorro',bus:'ônibus',motorcycle:'motocicleta',bench:'banco',truck:'caminhão'};
+threshold.addEventListener('input',()=>{thresholdValue.textContent=threshold.value+'%';});
+function beep(){
+ if(!audioContext || audioContext.state!=='running')return;
+ const now=audioContext.currentTime;
+ const osc=audioContext.createOscillator();
+ const gain=audioContext.createGain();
+ osc.type='sine';osc.frequency.value=880;
+ gain.gain.setValueAtTime(0.0001,now);
+ gain.gain.exponentialRampToValueAtTime(0.12,now+0.015);
+ gain.gain.exponentialRampToValueAtTime(0.0001,now+0.18);
+ osc.connect(gain);gain.connect(audioContext.destination);
+ osc.start(now);osc.stop(now+0.2);
+}
 function draw(predictions){
  const w=video.videoWidth,h=video.videoHeight;
- if(!w||!h)return;
+ if(!w||!h)return false;
  canvas.width=w;canvas.height=h;
  const ctx=canvas.getContext('2d');
  ctx.clearRect(0,0,w,h);ctx.lineWidth=Math.max(3,w/160);ctx.font=`${Math.max(18,w/32)}px sans-serif`;
+ let large=false;
  for(const p of predictions){
-  if(p.score<0.55)continue;
   const [x,y,bw,bh]=p.bbox;
-  ctx.strokeStyle='#7ce0b3';ctx.fillStyle='#7ce0b3';ctx.strokeRect(x,y,bw,bh);
-  const label=`${labels[p.class]||p.class} ${Math.round(p.score*100)}%`;
+  const areaPercent=100*(bw*bh)/(w*h);
+  const qualifies=areaPercent>=Number(threshold.value);
+  if(qualifies)large=true;
+  ctx.strokeStyle=qualifies?'#ffbd72':'#7ce0b3';ctx.fillStyle=ctx.strokeStyle;
+  ctx.strokeRect(x,y,bw,bh);
+  const label=`${labels[p.class]||p.class} ${Math.round(p.score*100)}% | área ${Math.round(areaPercent)}%`;
   const tw=ctx.measureText(label).width;
-  ctx.fillRect(x,Math.max(0,y-29),tw+12,29);
-  ctx.fillStyle='#101820';ctx.fillText(label,x+6,Math.max(21,y-7));
+  ctx.fillRect(x,Math.max(0,y-29),Math.min(w-x,tw+12),29);
+  ctx.fillStyle='#101820';ctx.fillText(label,x+6,Math.max(21,y-7),Math.max(10,w-x-12));
  }
+ return large;
 }
 async function loop(){
  if(!running)return;
@@ -49,26 +74,43 @@ async function loop(){
   busy=true;
   try{
    const predictions=(await model.detect(video)).filter(p=>p.score>=0.55);
-   draw(predictions);
-   resultsEl.textContent=predictions.length ? predictions.map(p=>`${labels[p.class]||p.class}: ${Math.round(p.score*100)}%`).join(' | ') : 'Nenhum objeto reconhecido neste quadro.';
-  }catch(err){statusEl.textContent='Erro na detecção: '+err.message;running=false;}
+   if(!running)return;
+   const large=draw(predictions);
+   consecutive=large?consecutive+1:0;
+   const alerting=consecutive>=2;
+   alertEl.textContent=alerting?'ALERTA: objeto ocupa grande área da imagem':'Sem alerta.';
+   alertEl.className=alerting?'warn':'';
+   if(alerting && performance.now()-lastBeep>1200){beep();lastBeep=performance.now();}
+   resultsEl.textContent=predictions.length?predictions.map(p=>`${labels[p.class]||p.class}: ${Math.round(p.score*100)}%`).join(' | '):'Nenhum objeto reconhecido neste quadro.';
+  }catch(err){statusEl.textContent='Erro na detecção: '+err.message;halt();}
   finally{busy=false;}
  }
  if(running)requestAnimationFrame(loop);
 }
+function halt(){
+ running=false;consecutive=0;
+ if(video.srcObject){video.srcObject.getTracks().forEach(track=>track.stop());video.srcObject=null;}
+ const ctx=canvas.getContext('2d');ctx.clearRect(0,0,canvas.width,canvas.height);
+ start.disabled=false;stop.disabled=true;alertEl.textContent='Sem alerta.';alertEl.className='';
+}
+stop.addEventListener('click',()=>{halt();statusEl.textContent='Câmera parada.';});
 start.addEventListener('click',async()=>{
  start.disabled=true;
  try{
+  // Ativação de áudio dentro do clique: necessária em navegadores móveis, incluindo Safari.
+  if(!audioContext)audioContext=new (window.AudioContext||window.webkitAudioContext)();
+  await audioContext.resume();
   if(!navigator.mediaDevices?.getUserMedia)throw new Error('A câmera exige HTTPS e um navegador compatível.');
   statusEl.textContent='Solicitando acesso à câmera...';
   const stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'},width:{ideal:640},height:{ideal:480}}});
   video.srcObject=stream;await video.play();
-  statusEl.textContent='Carregando modelo de IA (pode demorar na primeira vez)...';
-  if(!window.cocoSsd)throw new Error('Biblioteca de IA não carregada. Verifique a conexão à internet.');
-  model=await cocoSsd.load();
-  statusEl.textContent='Câmera ativa. Detecção experimental em execução.';
-  running=true;requestAnimationFrame(loop);
- }catch(err){statusEl.textContent='Não foi possível iniciar: '+err.message;start.disabled=false;}
+  statusEl.textContent='Carregando modelo de IA...';
+  if(!window.cocoSsd)throw new Error('Biblioteca de IA não carregada. Verifique a internet.');
+  if(!model)model=await cocoSsd.load();
+  running=true;lastBeep=performance.now();consecutive=0;
+  statusEl.textContent='Câmera ativa. Alerta sonoro experimental ligado.';
+  stop.disabled=false;requestAnimationFrame(loop);
+ }catch(err){halt();statusEl.textContent='Não foi possível iniciar: '+err.message;}
 });
-document.addEventListener('visibilitychange',()=>{if(document.hidden&&running){running=false;statusEl.textContent='Detecção pausada. Volte à página e reinicie se necessário.';}});
+document.addEventListener('visibilitychange',()=>{if(document.hidden&&running){halt();statusEl.textContent='Detecção pausada. Volte à página e reinicie.';}});
 </script></body></html>
